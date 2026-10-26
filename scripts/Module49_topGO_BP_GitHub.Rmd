@@ -1,0 +1,302 @@
+---
+title: "GO enrichment analysis of RSMod module 49"
+output: html_document
+---
+
+This R Markdown file reproduces the Gene Ontology (GO) enrichment analysis
+performed for genes assigned to RSMod module 49.
+
+The analysis tests GO Biological Process (BP) terms using the `topGO` package
+with the `elim` algorithm and Fisher's exact test. GO terms containing fewer
+than 10 annotated genes are excluded (`nodeSize = 10`).
+
+## Required input files
+
+- `filtered-uniqGO.map`: gene-to-GO mapping file used to define the annotation
+  and background gene universe.
+- `cluster49_list.txt`: one-column text file containing the gene IDs assigned
+  to module 49.
+
+Both files should be placed in the working directory together with this Rmd
+file, or the file paths below should be changed accordingly.
+
+## Main output files
+
+- `Module49_topGO_BP_top100.tsv`: top 100 enriched GO Biological Process terms.
+- `Module49_topGO_BP_gene_table.tsv`: genes associated with each of the reported
+  GO terms, including module 49 genes.
+- `cluster49_topGO_BP_bubble.eps`: bubble plot of the top 10 GO terms ranked by
+  enrichment p-value.
+
+```{r setup, message=FALSE, warning=FALSE}
+library(topGO)
+library(ggplot2)
+library(grid)
+library(stringr)
+
+options(stringsAsFactors = FALSE)
+```
+
+## GO enrichment analysis
+
+```{r enrichment}
+## =========================================================
+## INPUT DATA
+## =========================================================
+
+# Read the gene-to-GO mapping used to define the annotated gene universe.
+geneID2GO <- readMappings(
+  file = "filtered-uniqGO.map",
+  sep = "\t",
+  IDsep = ","
+)
+
+geneNames <- names(geneID2GO)
+
+# Read the module 49 gene list (one gene ID per line).
+cl49 <- read.delim(
+  "cluster49_list.txt",
+  header = FALSE,
+  stringsAsFactors = FALSE
+)$V1
+
+cl49 <- trimws(cl49)
+cl49 <- cl49[cl49 != ""]
+
+# Report basic input statistics.
+cat("Annotated background genes:", length(geneNames), "\n")
+cat("Genes in module 49 input list:", length(cl49), "\n")
+cat(
+  "Module 49 genes represented in the GO background:",
+  sum(cl49 %in% geneNames),
+  "\n"
+)
+
+
+## =========================================================
+## DEFINE THE topGO GENE UNIVERSE
+## =========================================================
+
+# Assign 1 to module 49 genes and 0 to all other genes in the annotated
+# background. The complete set of genes in geneID2GO is therefore used as
+# the background gene universe.
+geneList <- factor(
+  as.integer(geneNames %in% cl49)
+)
+
+names(geneList) <- geneNames
+
+
+## =========================================================
+## topGO ANALYSIS
+## =========================================================
+
+# Biological Process ontology; GO terms with fewer than 10 annotated genes
+# are excluded.
+GOdata <- new(
+  "topGOdata",
+  ontology = "BP",
+  allGenes = geneList,
+  annot = annFUN.gene2GO,
+  gene2GO = geneID2GO,
+  nodeSize = 10
+)
+
+# GO enrichment using the elim algorithm and Fisher's exact test.
+resultFis <- runTest(
+  GOdata,
+  algorithm = "elim",
+  statistic = "fisher"
+)
+
+
+## =========================================================
+## EXPORT ENRICHED GO TERMS
+## =========================================================
+
+# Retrieve the top 100 GO terms ranked by enrichment p-value.
+goEnrichment <- GenTable(
+  GOdata,
+  P_value = resultFis,
+  orderBy = "P_value",
+  topNodes = 100,
+  numChar = 1000
+)
+
+goEnrichment$P_value <- as.numeric(goEnrichment$P_value)
+
+# Retrieve annotated genes and module 49 genes for each reported GO term.
+goList <- goEnrichment$GO.ID
+
+gene_table <- do.call(
+  rbind,
+  lapply(
+    goList,
+    function(goid) {
+
+      annots <- genesInTerm(GOdata, goid)[[1]]
+      sigs <- annots[annots %in% sigGenes(GOdata)]
+
+      data.frame(
+        GO.ID = goid,
+        Term = goEnrichment$Term[
+          match(goid, goEnrichment$GO.ID)
+        ],
+        Annotated = length(annots),
+        Significant = length(sigs),
+        AnnotatedGenes = paste(
+          annots,
+          collapse = ";"
+        ),
+        Module49_Genes = paste(
+          sigs,
+          collapse = ";"
+        ),
+        stringsAsFactors = FALSE
+      )
+    }
+  )
+)
+
+write.table(
+  goEnrichment,
+  "Module49_topGO_BP_top100.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+write.table(
+  gene_table,
+  "Module49_topGO_BP_gene_table.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+```
+
+## Bubble plot of the top enriched GO terms
+
+The plot displays the 10 GO Biological Process terms with the lowest
+enrichment p-values. Gene Ratio is calculated as the number of module 49 genes
+associated with a GO term (`Significant`) divided by the number of background
+genes annotated to that term (`Annotated`). Point size represents the number of
+module 49 genes, and fill represents `-log10(p-value)`.
+
+```{r bubble-plot, fig.width=12, fig.height=12}
+ntop <- min(10, nrow(goEnrichment))
+
+goPlot <- goEnrichment[
+  seq_len(ntop),
+  ,
+  drop = FALSE
+]
+
+goPlot$P_value <- as.numeric(
+  goPlot$P_value
+)
+
+goPlot$Significant <- as.numeric(
+  goPlot$Significant
+)
+
+goPlot$Annotated <- as.numeric(
+  goPlot$Annotated
+)
+
+# Wrap long GO term labels.
+goPlot$Term_wrap <- str_wrap(
+  goPlot$Term,
+  width = 35
+)
+
+# Arrange terms by p-value in the plotted order.
+goPlot$Term_wrap <- factor(
+  goPlot$Term_wrap,
+  levels = rev(goPlot$Term_wrap)
+)
+
+p <- ggplot(
+  goPlot,
+  aes(
+    x = Term_wrap,
+    y = Significant / Annotated,
+    size = Significant,
+    fill = -log10(P_value)
+  )
+) +
+  expand_limits(y = 1) +
+  geom_point(shape = 21) +
+  scale_size(range = c(2, 15)) +
+  scale_fill_continuous(
+    low = "royalblue",
+    high = "red4"
+  ) +
+  xlab("") +
+  ylab("Gene Ratio") +
+  labs(
+    title = "GO Biological Processes",
+    subtitle = "Module 49: top 10 terms ranked by p-value"
+  ) +
+  theme_bw(base_size = 10) +
+  ylim(0, 0.2) +
+  theme(
+    legend.position = "right",
+    legend.background = element_rect(),
+    plot.title = element_text(
+      size = 10,
+      face = "bold"
+    ),
+    plot.subtitle = element_text(
+      size = 10,
+      face = "bold"
+    ),
+    axis.text.x = element_text(
+      size = 10,
+      face = "bold"
+    ),
+    axis.text.y = element_text(
+      size = 10,
+      face = "bold"
+    ),
+    axis.title = element_text(
+      size = 10,
+      face = "bold"
+    ),
+    axis.line = element_line(
+      colour = "black"
+    ),
+    legend.key = element_blank(),
+    legend.key.size = unit(1, "cm"),
+    legend.text = element_text(
+      size = 10,
+      face = "bold"
+    )
+  ) +
+  coord_flip()
+
+ggsave(
+  "cluster49_topGO_BP_bubble.eps",
+  plot = p,
+  device = "eps",
+  height = 160,
+  width = 180,
+  units = "mm"
+)
+```
+
+## Reproducibility notes
+
+- The annotated genes present in `filtered-uniqGO.map` define the background
+  gene universe.
+- Module 49 genes are tested against this background.
+- Ontology: Biological Process (`BP`).
+- Algorithm: `elim`.
+- Statistical test: Fisher's exact test.
+- Minimum GO term size: 10 annotated genes (`nodeSize = 10`).
+- The reported p-values are the `topGO` elim/Fisher p-values. No additional
+  multiple-testing adjustment is applied in this script.
+
+```{r session-info}
+sessionInfo()
+```

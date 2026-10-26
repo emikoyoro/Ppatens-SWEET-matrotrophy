@@ -1,0 +1,1071 @@
+---
+title: "Generalized Clustering"
+output: html_document
+---
+
+This R Markdown file reproduces the RSMod-based clustering and downstream module analyses used in this study. It performs BH-SNE mapping, OPTICS-based module extraction, visualization of module expression patterns, overlay of selected genes of interest, and export of module-assignment tables.
+
+### Required input files
+- `physco_mol-plant-data.csv`: tissue/developmental-stage expression matrix using the v1.6-style gene IDs used in the original RSMod analysis.
+- `geneid_interest.csv`: optional list of genes of interest and display names.
+- `P.patens_lookup_table_20230906.xlsx`: gene-ID lookup table used to map v1.6-style IDs to the latest v6 gene IDs.
+
+### Main output files
+- `All-Modules-3D-Testing.csv`: RSMod/OPTICS module assignments with BH-SNE coordinates.
+- `All-Modules-3D-Testing_v6.csv`: the same module assignments with the corresponding v6 gene IDs added from the lookup table.
+- `RSMod_expression_module_table.csv`: expression values, v6 IDs, BH-SNE coordinates, and module assignments combined in one table.
+
+The analysis uses BH-SNE with perplexity = 25, three dimensions, theta = 0.5, 1,000 iterations, seed = 100, and lying = 500. OPTICS clustering is performed with cutoff = 55.
+
+```{r, include=FALSE}
+## =========================================================
+## LIBRARIES
+## =========================================================
+
+library(RSMod)
+library(fpc)
+library(plyr)
+library(ggplot2)
+library(clusterSim)
+library(reshape)
+library(reshape2)
+library(rgl)
+library(dplyr)
+library(readr)
+library(readxl)
+library(tidyr)
+
+options(stringsAsFactors = FALSE)
+```
+
+## READ IN DATA FILES
+```{r}
+## =========================================================
+## READ DATA
+## =========================================================
+
+# Expression data for all genes
+data <- read.csv(
+  "physco_mol-plant-data.csv",
+  header = TRUE
+)
+
+# Convert gene IDs from V6 to V6.1 format
+# Example: Pp1s1_100V6 -> Pp1s1_100V6.1
+data$itag <- paste0(data$itag, ".1")
+
+
+# List of genes of interest for subsequent module assignment
+# These genes are not used to define the clusters
+interest <- read.csv(
+  "geneid_interest.csv",
+  header = TRUE
+)
+
+colnames(interest)[1] <- "itag"
+## =========================================================
+## EXPAND INTEREST GENE IDs
+## Split multiple IDs separated by ";" and treat each ID as an independent gene
+## =========================================================
+
+interest.expanded <- do.call(
+  rbind,
+  lapply(seq_len(nrow(interest)), function(i) {
+
+    ids <- unlist(
+      strsplit(
+        as.character(interest$itag[i]),
+        ";",
+        fixed = TRUE
+      )
+    )
+
+    ids <- trimws(ids)
+    ids <- ids[ids != ""]
+
+    data.frame(
+      itag = ids,
+      Name = interest$Name[i],
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+rownames(interest.expanded) <- NULL
+
+print(interest.expanded)
+```
+
+```{r}
+## =========================================================
+## LOG TRANSFORM AND NORMALIZE
+## =========================================================
+
+# Use the complete expression dataset
+# No gene subset is applied before clustering
+
+cluster.set <- data_norm(
+  trans = data
+)
+
+# Check dimensions
+dim(cluster.set)
+```
+
+```{r}
+## =========================================================
+## BH-SNE MAPPING
+## =========================================================
+
+cluster.matrix <- clusterSNE(
+  data.set = cluster.set,
+  perp = 25,
+  dim = 3,
+  tha = 0.5,
+  pc = FALSE,
+  iter = 1000,
+  seed = 100,
+  lying = 500
+)
+```
+
+```{r}
+## =========================================================
+## SELECT BEST CUTOFF VALUE
+## =========================================================
+
+cutoffTest <- clusteringOPtions(
+  cluster = cluster.matrix,
+  dim = 3
+)
+
+print(cutoffTest)
+```
+
+
+```{r}
+## =========================================================
+## MODULE EXTRACTION
+## =========================================================
+
+# Select the cutoff based on the cutoff evaluation above
+modules <- clusteringOptics(
+  cluster = cluster.matrix,
+  cutoff = 55,
+  dim = 3
+)
+
+# Retain gene IDs explicitly as a column for downstream analyses
+modules$itag <- rownames(modules)
+
+# Check the number of genes assigned to each module
+table(modules$colors)
+```
+
+```{r,fig.width=8,fig.height=6}
+## =========================================================
+## SHOWTIME MAPPING
+## =========================================================
+
+x <- showtimeMapping(
+  base = cluster.matrix,
+  clusters = modules,
+  dim = 3
+)
+
+# Optional: create an interactive 3D widget for HTML output
+# widget <- rglwidget()
+```
+
+
+```{r}
+## =========================================================
+## MODULE OVERLAY
+## =========================================================
+
+# Example: overlay modules 1-6
+ModOverlay(
+  base = cluster.matrix,
+  clusters = modules,
+  n = c(1, 2, 3, 4, 5, 6),
+  dim = 3
+)
+## =========================================================
+## SAVE ALL MODULE INFORMATION
+## =========================================================
+
+write.csv(
+  modules,
+  "All-Modules-3D-Testing.csv",
+  row.names = FALSE
+)
+```
+
+## MAP ORIGINAL GENE IDs TO V6 GENE IDs
+
+The original RSMod analysis uses the v1.6-style gene identifiers retained in the
+published expression dataset. The following step adds the corresponding v6 gene
+IDs without changing the BH-SNE coordinates or OPTICS module assignments.
+
+```{r}
+## =========================================================
+## GENE-ID CONVERSION: v1.6-style IDs -> v6 IDs
+## =========================================================
+
+# Read the P. patens gene-ID lookup table.
+# The exact worksheet/column names are detected below so that the conversion
+# remains explicit and reproducible.
+lookup_raw <- readxl::read_excel(
+  "P.patens_lookup_table_20230906.xlsx"
+)
+
+# Identify the v6 and v1.6 columns.
+v6_col <- grep(
+  "^Gene_ID_v6$",
+  names(lookup_raw),
+  value = TRUE
+)
+
+v16_col <- grep(
+  "gene_id_v1\\.6",
+  names(lookup_raw),
+  value = TRUE,
+  ignore.case = TRUE
+)
+
+if (length(v6_col) != 1 || length(v16_col) != 1) {
+  stop(
+    "Could not uniquely identify the Gene_ID_v6 and gene_id_v1.6 columns ",
+    "in P.patens_lookup_table_20230906.xlsx. Check the worksheet/header row."
+  )
+}
+
+lookup_v6 <- lookup_raw %>%
+  dplyr::select(
+    Gene_ID_v6 = dplyr::all_of(v6_col),
+    itag = dplyr::all_of(v16_col)
+  ) %>%
+  tidyr::separate_rows(itag, sep = ";") %>%
+  dplyr::mutate(
+    itag = trimws(itag),
+    Gene_ID_v6 = trimws(Gene_ID_v6)
+  ) %>%
+  dplyr::filter(!is.na(itag), itag != "") %>%
+  dplyr::distinct(itag, Gene_ID_v6)
+
+# Add v6 IDs to the module table.
+# BH-SNE coordinates and module assignments are retained unchanged.
+modules_v6 <- modules %>%
+  dplyr::left_join(lookup_v6, by = "itag")
+
+# Export the v6-annotated module table.
+readr::write_csv(
+  modules_v6,
+  "All-Modules-3D-Testing_v6.csv"
+)
+
+# Report mapping coverage.
+cat(
+  "Genes with a mapped v6 ID:",
+  sum(!is.na(modules_v6$Gene_ID_v6)),
+  "of",
+  nrow(modules_v6),
+  "\n"
+)
+```
+
+```{r}
+## =========================================================
+## GENES OF INTEREST
+## =========================================================
+
+# Use the expanded gene-of-interest table
+# Multiple IDs originally stored in one cell are treated as independent entries
+interest.modules <- merge(
+  interest.expanded,
+  modules,
+  by = "itag",
+  all.x = FALSE,
+  all.y = FALSE,
+  sort = FALSE
+)
+
+# Inspect the resulting table
+print(interest.modules)
+
+# Identify genes of interest that are absent from the expression dataset
+interest.not.found <- interest.expanded[
+  !interest.expanded$itag %in% data$itag,
+  ,
+  drop = FALSE
+]
+
+cat("\nInterest IDs not found in expression data:\n")
+print(interest.not.found)
+
+# Save the output table
+write.csv(
+  interest.modules,
+  "Genes-of-interest-Modules.csv",
+  row.names = FALSE
+)
+```
+
+
+```{r}
+## =========================================================
+## MODULE TRANSCRIPT PATTERNS
+## + GENES OF INTEREST OVERLAY
+##
+## Black line   = Module Median
+## Grey area    = Module Q1-Q3
+## Colored line = Gene of interest
+## =========================================================
+
+# Module IDs, excluding the unclassified ("grey") group
+module.ids <- sort(
+  as.numeric(
+    setdiff(
+      unique(as.character(modules$colors)),
+      "grey"
+    )
+  )
+)
+
+# Check dimensions
+print(module.ids)
+length(module.ids)
+
+
+## =========================================================
+## Iterate over all modules
+## =========================================================
+
+for (k in module.ids) {
+
+  cat("\nProcessing Module", k, "\n")
+
+
+  ## -------------------------------------------------------
+  ## 1. Genes assigned to module k
+  ## -------------------------------------------------------
+
+  module.genes <- modules$itag[
+    as.character(modules$colors) == as.character(k)
+  ]
+
+  module.genes <- module.genes[
+    !is.na(module.genes) & module.genes != ""
+  ]
+
+
+  ## -------------------------------------------------------
+  ## 2. Extract expression data
+  ## -------------------------------------------------------
+
+  pattern.sne <- data[
+    data$itag %in% module.genes,
+    ,
+    drop = FALSE
+  ]
+
+  if(nrow(pattern.sne) == 0) next
+
+  rownames(pattern.sne) <- pattern.sne$itag
+
+  pattern.sne <- pattern.sne[
+    ,
+    2:ncol(pattern.sne),
+    drop = FALSE
+  ]
+
+
+  ## -------------------------------------------------------
+  ## 3. log2(x + 1)
+  ## -------------------------------------------------------
+
+  pattern.sne <- log2(
+    as.matrix(pattern.sne) + 1
+  )
+
+  pattern.sne[is.infinite(pattern.sne)] <- 0
+
+
+  ## -------------------------------------------------------
+  ## 4. Row normalization
+  ## -------------------------------------------------------
+
+  pattern.sne <- data.Normalization(
+    pattern.sne,
+    type = "n1",
+    normalization = "row"
+  )
+
+  pattern.sne <- as.matrix(pattern.sne)
+
+  pattern.sne[is.nan(pattern.sne)] <- 0
+
+
+  ## -------------------------------------------------------
+  ## 5. Module median / Q1 / Q3
+  ## -------------------------------------------------------
+
+  pattern.summary <- data.frame(
+
+    Stage = colnames(pattern.sne),
+
+    Median = apply(
+      pattern.sne,
+      2,
+      median,
+      na.rm = TRUE
+    ),
+
+    Q1 = apply(
+      pattern.sne,
+      2,
+      quantile,
+      probs = 0.25,
+      na.rm = TRUE
+    ),
+
+    Q3 = apply(
+      pattern.sne,
+      2,
+      quantile,
+      probs = 0.75,
+      na.rm = TRUE
+    )
+  )
+
+  pattern.summary$Stage <- factor(
+    pattern.summary$Stage,
+    levels = colnames(pattern.sne)
+  )
+
+
+## -------------------------------------------------------
+## 6. Interested genes in this module
+##    Plot multiple IDs as independent lines
+## -------------------------------------------------------
+
+# Reinitialize for each module
+interest.long <- NULL
+
+interest.module <- interest.expanded[
+  interest.expanded$itag %in% rownames(pattern.sne),
+  ,
+  drop = FALSE
+]
+
+cat(
+  "Module", k,
+  ":",
+  nrow(interest.module),
+  "genes of interest\n"
+)
+
+
+if(nrow(interest.module) > 0){
+
+  ## Process each gene-of-interest entry independently
+  interest.list <- lapply(
+    seq_len(nrow(interest.module)),
+    function(i){
+
+      gene.id <- interest.module$itag[i]
+      gene.name <- interest.module$Name[i]
+
+      expr <- pattern.sne[
+        gene.id,
+        ,
+        drop = TRUE
+      ]
+
+      data.frame(
+        itag = gene.id,
+        Name = gene.name,
+        Stage = colnames(pattern.sne),
+        Expression = as.numeric(expr),
+
+        Label = paste0(
+          gene.name,
+          " (",
+          gene.id,
+          ")"
+        ),
+
+        stringsAsFactors = FALSE
+      )
+    }
+  )
+
+  interest.long <- do.call(
+    rbind,
+    interest.list
+  )
+
+
+  ## Preserve tissue/stage order
+  interest.long$Stage <- factor(
+    interest.long$Stage,
+    levels = colnames(pattern.sne)
+  )
+
+
+  ## Preserve legend order from geneid_interest.csv
+  interest.long$Label <- factor(
+    interest.long$Label,
+    levels = unique(
+      paste0(
+        interest.module$Name,
+        " (",
+        interest.module$itag,
+        ")"
+      )
+    )
+  )
+}
+
+
+  ## -------------------------------------------------------
+  ## 7. Base plot
+  ## -------------------------------------------------------
+
+  p <- ggplot(
+    pattern.summary,
+    aes(
+      x = Stage,
+      group = 1
+    )
+  ) +
+
+    # Module Q1-Q3
+    geom_ribbon(
+      aes(
+        ymin = Q1,
+        ymax = Q3
+      ),
+      fill = "grey70",
+      alpha = 1
+    ) +
+
+    # Module Median
+    geom_line(
+      aes(y = Median),
+      colour = "black",
+      linewidth = 1.5
+    )
+
+
+## -------------------------------------------------------
+## 8. Overlay genes of interest
+## -------------------------------------------------------
+
+if(nrow(interest.module) > 0){
+
+  p <- p +
+
+    geom_line(
+      data = interest.long,
+      aes(
+        x = Stage,
+        y = Expression,
+        group = Label,
+        colour = Label
+      ),
+      linewidth = 1
+    )
+}
+
+
+  ## -------------------------------------------------------
+  ## 9. Plot appearance
+  ## -------------------------------------------------------
+
+  p <- p +
+
+    theme_bw() +
+
+    xlab("Tissue / Stage") +
+
+    ylab("Relative Expression") +
+
+    ggtitle(
+      paste0(
+        "Module ",
+        k,
+        " (n = ",
+        nrow(pattern.sne),
+        ")"
+      )
+    ) +
+
+    theme(
+
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1,
+        size = 10
+      ),
+
+      axis.text.y = element_text(
+        size = 10
+      ),
+
+      axis.title = element_text(
+        size = 12
+      ),
+
+      plot.title = element_text(
+        size = 14
+      ),
+
+      legend.title = element_blank(),
+
+      legend.text = element_text(
+        size = 9
+      )
+    )
+
+
+  ## -------------------------------------------------------
+  ## 10. Display plot
+  ## -------------------------------------------------------
+
+  print(p)
+
+
+  ## -------------------------------------------------------
+  ## 11. Save as EPS
+  ## -------------------------------------------------------
+
+  ggsave(
+    filename = paste0(
+      "Module_",
+      k,
+      "_Expression_with_Interest.eps"
+    ),
+    plot = p,
+    device = "eps",
+    width = 8,
+    height = 6,
+    units = "in"
+  )
+}   # End of module loop
+```
+
+```{r}
+## =========================================================
+## MODULE TRANSCRIPT PATTERNS
+##
+## Black line = Module Median
+## Grey area  = Module Q1-Q3
+##
+## All modules except "grey"
+## =========================================================
+
+
+library(ggplot2)
+
+
+## =========================================================
+## 1. MODULE IDs
+## =========================================================
+
+# Retrieve module IDs, excluding the unclassified ("grey") group
+module.ids <- sort(
+  as.numeric(
+    setdiff(
+      unique(as.character(modules$colors)),
+      "grey"
+    )
+  )
+)
+
+# Check dimensions
+print(module.ids)
+cat("Number of modules:", length(module.ids), "\n")
+
+
+## =========================================================
+## 2. PLOT ALL MODULES
+## =========================================================
+
+for (k in module.ids) {
+
+  cat("\n========================================\n")
+  cat("Processing Module", k, "\n")
+  cat("========================================\n")
+
+
+  ## -------------------------------------------------------
+  ## 2-1. Genes belonging to module k
+  ## -------------------------------------------------------
+
+  module.genes <- modules$itag[
+    as.character(modules$colors) == as.character(k)
+  ]
+
+  # Remove NA and empty gene IDs
+  module.genes <- module.genes[
+    !is.na(module.genes) &
+      module.genes != ""
+  ]
+
+  cat(
+    "Genes assigned to Module",
+    k,
+    ":",
+    length(module.genes),
+    "\n"
+  )
+
+
+  ## -------------------------------------------------------
+  ## 2-2. Extract expression data
+  ## -------------------------------------------------------
+
+  pattern.sne <- data[
+    data$itag %in% module.genes,
+    ,
+    drop = FALSE
+  ]
+
+  cat(
+    "Genes found in expression data:",
+    nrow(pattern.sne),
+    "\n"
+  )
+
+
+  # Skip modules with no matching expression data
+  if (nrow(pattern.sne) == 0) {
+
+    cat(
+      "No expression data found for Module",
+      k,
+      "- skipped\n"
+    )
+
+    next
+  }
+
+
+  ## -------------------------------------------------------
+  ## 2-3. Gene ID → rownames
+  ## -------------------------------------------------------
+
+  rownames(pattern.sne) <- pattern.sne$itag
+
+
+  # Remove the gene ID column before numeric transformation
+  pattern.sne <- pattern.sne[
+    ,
+    setdiff(
+      colnames(pattern.sne),
+      "itag"
+    ),
+    drop = FALSE
+  ]
+
+
+  ## -------------------------------------------------------
+  ## 2-4. Convert to numeric matrix
+  ## -------------------------------------------------------
+
+  pattern.sne <- as.matrix(pattern.sne)
+
+  storage.mode(pattern.sne) <- "numeric"
+
+
+  ## -------------------------------------------------------
+  ## 2-5. log2(x + 1)
+  ## -------------------------------------------------------
+
+  pattern.sne <- log2(
+    pattern.sne + 1
+  )
+
+
+  # Replace infinite values with NA
+  pattern.sne[
+    is.infinite(pattern.sne)
+  ] <- NA
+
+
+  ## -------------------------------------------------------
+  ## 2-6. Row normalization
+  ## -------------------------------------------------------
+
+  pattern.sne <- data.Normalization(
+    pattern.sne,
+    type = "n1",
+    normalization = "row"
+  )
+
+  pattern.sne <- as.matrix(
+    pattern.sne
+  )
+
+
+  # Replace NaN values with 0
+  pattern.sne[
+    is.nan(pattern.sne)
+  ] <- 0
+
+
+  ## -------------------------------------------------------
+  ## 2-7. Module Median / Q1 / Q3
+  ## -------------------------------------------------------
+
+  pattern.summary <- data.frame(
+
+    Stage = colnames(pattern.sne),
+
+    Median = apply(
+      pattern.sne,
+      2,
+      median,
+      na.rm = TRUE
+    ),
+
+    Q1 = apply(
+      pattern.sne,
+      2,
+      quantile,
+      probs = 0.25,
+      na.rm = TRUE
+    ),
+
+    Q3 = apply(
+      pattern.sne,
+      2,
+      quantile,
+      probs = 0.75,
+      na.rm = TRUE
+    ),
+
+    stringsAsFactors = FALSE
+  )
+
+
+  ## -------------------------------------------------------
+  ## 2-8. Fix tissue / stage order
+  ## -------------------------------------------------------
+
+  pattern.summary$Stage <- factor(
+    pattern.summary$Stage,
+    levels = colnames(pattern.sne)
+  )
+
+
+  ## -------------------------------------------------------
+  ## 2-9. Plot
+  ## -------------------------------------------------------
+
+  p <- ggplot(
+    pattern.summary,
+    aes(
+      x = Stage,
+      group = 1
+    )
+  ) +
+
+
+    ## Q1-Q3
+    geom_ribbon(
+      aes(
+        ymin = Q1,
+        ymax = Q3
+      ),
+      fill = "grey70",
+      alpha = 1
+    ) +
+
+
+    ## Module Median
+    geom_line(
+      aes(
+        y = Median
+      ),
+      colour = "black",
+      linewidth = 1.5
+    ) +
+
+
+    ## -----------------------------------------------------
+    ## Labels
+    ## -----------------------------------------------------
+
+    xlab(
+      "Tissue / Stage"
+    ) +
+
+    ylab(
+      "Relative Expression"
+    ) +
+
+    ggtitle(
+      paste0(
+        "Module ",
+        k,
+        " (n = ",
+        nrow(pattern.sne),
+        ")"
+      )
+    ) +
+
+
+    ## -----------------------------------------------------
+    ## Theme
+    ## -----------------------------------------------------
+
+    theme_bw() +
+
+    theme(
+
+      ## X axis
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1,
+        size = 10
+      ),
+
+      ## Y axis
+      axis.text.y = element_text(
+        size = 10
+      ),
+
+      ## Axis titles
+      axis.title = element_text(
+        size = 12
+      ),
+
+      ## Plot title
+      plot.title = element_text(
+        size = 14,
+        face = "bold"
+      ),
+
+      ## No legend
+      legend.position = "none"
+    )
+
+
+  ## -------------------------------------------------------
+  ## 2-10. Display
+  ## -------------------------------------------------------
+
+  print(p)
+
+
+  ## -------------------------------------------------------
+  ## 2-11. Save EPS
+  ## -------------------------------------------------------
+
+  ggsave(
+
+    filename = paste0(
+      "Module_",
+      k,
+      "_Expression.eps"
+    ),
+
+    plot = p,
+
+    device = "eps",
+
+    width = 8,
+
+    height = 6,
+
+    units = "in"
+  )
+
+
+  cat(
+    "Saved:",
+    paste0(
+      "Module_",
+      k,
+      "_Expression.eps"
+    ),
+    "\n"
+  )
+
+}
+
+
+## =========================================================
+## END
+## =========================================================
+
+cat(
+  "\nAll module plots completed.\n"
+)
+```
+
+## COMBINE EXPRESSION VALUES, V6 IDS, COORDINATES, AND MODULES
+
+```{r}
+## =========================================================
+## FINAL COMBINED TABLE
+## =========================================================
+
+# Re-read the original expression matrix so that the exported table retains
+# the original tissue/developmental-stage expression values.
+expr <- readr::read_csv(
+  "physco_mol-plant-data.csv",
+  show_col_types = FALSE
+) %>%
+  dplyr::mutate(
+    # Example: Pp1s1_100V6 -> Pp1s1_100V6.1
+    itag = paste0(itag, ".1")
+  )
+
+# Join expression values to the v6-annotated RSMod module table.
+merged <- expr %>%
+  dplyr::left_join(modules_v6, by = "itag")
+
+# Retain the columns used for downstream analyses and data sharing.
+result <- merged %>%
+  dplyr::select(
+    itag,
+    Gene_ID_v6,
+    spores, caulonema, chloronema, gametophore,
+    rhizoids, archegonia, S1, S2, S3, SM,
+    x, y, z,
+    colors
+  ) %>%
+  dplyr::rename(
+    V6.1name = Gene_ID_v6,
+    module = colors
+  )
+
+readr::write_csv(
+  result,
+  "RSMod_expression_module_table.csv"
+)
+
+cat(
+  "Saved RSMod_expression_module_table.csv with",
+  nrow(result),
+  "rows.
+"
+)
+```
+
+## REPRODUCIBILITY NOTES
+
+- `All-Modules-3D-Testing_v6.csv` is generated from `All-Modules-3D-Testing.csv`
+  by adding v6 gene IDs from `P.patens_lookup_table_20230906.xlsx`.
+- Gene-ID conversion does not alter BH-SNE coordinates or OPTICS module assignments.
+- Multiple v1.6-style IDs stored in a single lookup-table cell are separated before mapping.
+- Some original gene IDs may not have a corresponding v6 gene ID and therefore remain `NA`.
+- For exact reproducibility, retain the input files and package versions used for the analysis.
+
+```{r}
+## Record the R environment used to run the analysis
+sessionInfo()
+```
